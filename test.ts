@@ -1,8 +1,8 @@
 import fetch from 'node-fetch';
-import fs from 'fs';
-import dotenv from "dotenv"
-dotenv.config()
+import fs from 'fs/promises';
+import dotenv from 'dotenv';
 
+dotenv.config();
 
 
 interface Task {
@@ -10,66 +10,166 @@ interface Task {
     title: string;
     accountId: string;
     importance: string;
-    parentIds: string[];
     createdDate: string;
     updatedDate: string;
     permalink: string;
+    responsibleIds?: string[];
+    parentIds?: string[];
 }
 
-interface FormattedTask {
+interface User {
     id: string;
-    name: string;
-    assignee: string;
-    status: string;
-    collections: string[];
-    created_at: string;
-    updated_at: string;
-    ticket_url: string;
+    firstName: string;
+    lastName: string;
+    primaryEmail: string;
 }
 
+interface Project {
+    id: string;
+    title: string;
+}
 
-async function getTasks(accessToken: string):Promise<void>{
-    const response = await fetch('https://www.wrike.com/api/v4/tasks', {
+interface TaskWithUser extends Task {
+    users: User[];
+}
+
+interface ProjectStructure {
+    projectId: string;
+    projectName: string;
+    tasks: TaskWithUser[];
+}
+
+async function fetchTasks(accessToken: string): Promise<Task[]> {
+    const response = await fetch('https://www.wrike.com/api/v4/tasks?fields=[responsibleIds,parentIds]', {
         method: 'GET',
-        headers: { 'Authorization': `Bearer ${accessToken}` }
+        headers: { 'Authorization': `Bearer ${accessToken}` },
     });
 
     if (!response.ok) {
-        throw new Error(`Error: ${response.status}, ${response.statusText}`);
+        const errorData = await response.json();
+        throw new Error(`Error fetching tasks: ${response.status}, ${response.statusText}, ${JSON.stringify(errorData)}`);
     }
 
     const data:any = await response.json();
-    const tasks: Task[] = data.data;
+    return data.data;
+}
 
-    const formattedTasks: FormattedTask[] = tasks.map(task => ({
+async function fetchUsers(accessToken: string): Promise<User[]> {
+    const tasksResponse = await fetch('https://www.wrike.com/api/v4/tasks?fields=[responsibleIds]', {
+        method: 'GET',
+        headers: { 'Authorization': `Bearer ${accessToken}` },
+    });
+
+    if (!tasksResponse.ok) {
+        const errorData = await tasksResponse.json();
+        throw new Error(`Error fetching tasks: ${tasksResponse.status}, ${tasksResponse.statusText}, ${JSON.stringify(errorData)}`);
+    }
+
+    const tasksData:any = await tasksResponse.json();
+    const allResponsibleIds = tasksData.data.map((task: Task) => task.responsibleIds).flat();
+
+    const usersResponse = await fetch(`https://www.wrike.com/api/v4/users/${allResponsibleIds.join(',')}`, {
+        method: 'GET',
+        headers: { 'Authorization': `Bearer ${accessToken}` },
+    });
+
+    if (!usersResponse.ok) {
+        const errorData = await usersResponse.json();
+        throw new Error(`Error fetching user details: ${usersResponse.status}, ${usersResponse.statusText}, ${JSON.stringify(errorData)}`);
+    }
+
+    const usersData:any = await usersResponse.json();
+    return usersData.data;
+}
+
+async function fetchProjects(accessToken: string): Promise<Project[]> {
+    const response = await fetch('https://www.wrike.com/api/v4/folders?project', {
+        method: 'GET',
+        headers: { 'Authorization': `Bearer ${accessToken}` },
+    });
+
+    if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(`Error fetching projects: ${response.status}, ${response.statusText}, ${JSON.stringify(errorData)}`);
+    }
+
+    const data:any = await response.json();
+    return data.data;
+}
+
+function formatTasks(tasks: Task[]): Task[] {
+    return tasks.map((task) => ({
         id: task.id,
         name: task.title,
         assignee: task.accountId,
         status: task.importance,
-        collections: task.parentIds,
         created_at: task.createdDate,
         updated_at: task.updatedDate,
-        ticket_url: task.permalink
+        ticket_url: task.permalink,
+        responsibleIds: task.responsibleIds || [],
+        parentIds: task.parentIds || [],
     }));
 }
 
- async function file(formatedtask:FormattedTask):Promise<FormattedTask>{
-    fs.writeFileSync('tasks.json', JSON.stringify(formatedtask, null, 2));
-    return formatedtask
- }   
-    
+function formatUsers(users: User[]): User[] {
+    return users.map((user) => ({
+        userid: user.id,
+        userfirstname: user.firstName,
+        userlastname: user.lastName,
+        userprimaryEmail: user.primaryEmail,
+    }));
+}
 
+async function buildProjectsStructure(projects: Project[], tasks: Task[], users: User[]): Promise<ProjectStructure[]> {
+    return projects.map(project => {
+        const projectTasks = tasks.filter(task => task.parentIds?.includes(project.id));
 
-async function main() {
-    const accessToken:any = process.env.TOKEN 
+        const tasksWithUsers = projectTasks.map(task => {
+            const taskUsers = task.responsibleIds?.map(responsibleId =>
+                users.find(user => user.userid === responsibleId)
+            ).filter((user): user is User => user !== undefined);
+
+            return {
+                ...task,
+                users: taskUsers || [],
+            };
+        });
+
+        return {
+            projectId: project.id,
+            projectName: project.title,
+            tasks: tasksWithUsers,
+        };
+    });
+}
+
+async function saveToFile(data: ProjectStructure[]): Promise<void> {
+    await fs.writeFile('projects_with_tasks_and_users.json', JSON.stringify(data, null, 2));
+}
+
+async function main(): Promise<void> {
+    const accessToken = process.env.TOKEN;
+    if (!accessToken) {
+        console.error('Access token is not defined. Please set the TOKEN in your .env file.');
+        return;
+    }
+
     try {
-        const tasks = await getTasks(accessToken);
-        await file(tasks)
-        console.log('Tasks are ready:', tasks);
+        const tasks = await fetchTasks(accessToken);
+        const users = await fetchUsers(accessToken);
+        const projects = await fetchProjects(accessToken);
+
+        const formattedTasks = formatTasks(tasks);
+        const formattedUsers = formatUsers(users);
+
+        const projectStructure = await buildProjectsStructure(projects, formattedTasks, formattedUsers);
+
+        await saveToFile(projectStructure);
+
+        console.log('Projects structure is ready and saved to projects_with_tasks_and_users.json');
     } catch (error) {
-        console.error('Error tasks:', error);
+        console.error('Error:', error);
     }
 }
 
 main();
-
