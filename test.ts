@@ -19,6 +19,7 @@ interface Task {
 
 interface User {
     id: string;
+    userid:string
     firstName: string;
     lastName: string;
     primaryEmail: string;
@@ -97,7 +98,7 @@ async function fetchProjects(accessToken: string): Promise<Project[]> {
     return data.data;
 }
 
-function formatTasks(tasks: Task[]): Task[] {
+function formatTasks(tasks: Task[]):any {
     return tasks.map((task) => ({
         id: task.id,
         name: task.title,
@@ -111,7 +112,7 @@ function formatTasks(tasks: Task[]): Task[] {
     }));
 }
 
-function formatUsers(users: User[]): User[] {
+function formatUsers(users: User[]): any {
     return users.map((user) => ({
         userid: user.id,
         userfirstname: user.firstName,
@@ -127,7 +128,7 @@ async function buildProjectsStructure(projects: Project[], tasks: Task[], users:
         const tasksWithUsers = projectTasks.map(task => {
             const taskUsers = task.responsibleIds?.map(responsibleId =>
                 users.find(user => user.userid === responsibleId)
-            ).filter((user): user is User => user !== undefined);
+            ).filter((user):user is User => user !== undefined);
 
             return {
                 ...task,
